@@ -1,0 +1,166 @@
+# One build stage: continues out/electron from the previous stage for as long as the job time
+# limit allows, then hands it to the next stage, or packages the finished build.
+name: Build stage
+on:
+  workflow_call:
+    inputs:
+      stage:
+        type: number
+        required: true
+      sdk_key:
+        type: string
+        required: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 358
+    steps:
+      - name: Start time
+        id: start
+        run: |
+          echo "START=$(date +%s)" >> "$GITHUB_ENV"
+          echo "prev=$(( ${{ inputs.stage }} - 1 ))" >> "$GITHUB_OUTPUT"
+
+      - name: Already finished?
+        id: done
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: done-electron
+          path: ${{ runner.temp }}/done
+
+      - name: Checkout CI scripts
+        if: steps.done.outcome != 'success'
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: winrt
+          fetch-depth: 1
+
+      # 16 GB RAM is not enough for the heaviest compile/ThinLTO steps running side by side:
+      # without more swap the runner starves and loses its connection.
+      - name: Prepare /home/winrt
+        if: steps.done.outcome != 'success'
+        uses: ./winrt/ci/host
+        with:
+          swap: 24
+
+      - name: Restore toolchain
+        if: steps.done.outcome != 'success'
+        uses: actions/cache/restore@v4
+        with:
+          key: ${{ inputs.sdk_key }}
+          path: /home/winrt/sdk
+          fail-on-cache-miss: true
+
+      - name: Builder image
+        if: steps.done.outcome != 'success'
+        uses: ./winrt/ci/image
+
+      - name: Checkout source
+        if: steps.done.outcome != 'success'
+        run: winrt/ci/run checkout.sh "$GITHUB_SHA"
+
+      - name: Build directory disk
+        if: steps.done.outcome != 'success' && env.WINRT_OUT_DISK != ''
+        run: |
+          sudo mkdir -p "$WINRT_OUT_DISK" && sudo chown "$(id -u):$(id -g)" "$WINRT_OUT_DISK"
+          mkdir -p /home/winrt/gc/src/out && sudo mount --bind "$WINRT_OUT_DISK" /home/winrt/gc/src/out
+          df -h / /mnt
+
+      - name: Resume point
+        id: resume
+        if: steps.done.outcome != 'success' && inputs.stage == 1
+        run: |
+          # winrt/ci/resume: "<run id> <stage>" continues from that run's stage output.
+          if [ -s winrt/ci/resume ]; then
+            read -r run st < winrt/ci/resume
+            echo "run=$run" >> "$GITHUB_OUTPUT"; echo "stage=$st" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Previous stage output
+        if: steps.done.outcome != 'success' && inputs.stage > 1
+        uses: actions/download-artifact@v4
+        with:
+          name: out-electron-${{ steps.start.outputs.prev }}
+          path: /home/winrt/xfer
+
+      - name: Earlier run's output
+        id: earlier
+        if: steps.resume.outputs.run != ''
+        continue-on-error: true      # expired: start from scratch
+        uses: actions/download-artifact@v4
+        with:
+          name: out-electron-${{ steps.resume.outputs.stage }}
+          run-id: ${{ steps.resume.outputs.run }}
+          github-token: ${{ github.token }}
+          path: /home/winrt/xfer
+
+      - name: Unpack previous stage output
+        if: steps.done.outcome != 'success' && (inputs.stage > 1 || steps.earlier.outcome == 'success')
+        run: |
+          sudo mkdir -p /home/winrt/gc/src/out
+          cat /home/winrt/xfer/out.tar.zst.* | sudo tar -I zstd -xf - -C /home/winrt/gc/src/out
+          sudo rm -rf /home/winrt/xfer
+
+      - name: Build
+        id: build
+        if: steps.done.outcome != 'success'
+        run: |
+          # Leave time to hand the output on: ~25 min for packing and uploading.
+          left=$(( (START + 330*60 - $(date +%s)) / 60 - 25 ))
+          echo "building for at most $left min"
+          [ "$left" -gt 10 ] || { echo "result=continue" >> "$GITHUB_OUTPUT"; exit 0; }
+          set +e
+          winrt/ci/run build.sh "$left"
+          rc=$?
+          set -e
+          case $rc in
+            0) echo "result=finished" >> "$GITHUB_OUTPUT" ;;
+            3) echo "result=continue" >> "$GITHUB_OUTPUT" ;;
+            *) echo "result=failed" >> "$GITHUB_OUTPUT" ;;   # the output is still handed on
+          esac
+
+      - name: Pack output for the next stage
+        if: steps.build.outputs.result == 'continue' || steps.build.outputs.result == 'failed'
+        run: |
+          sudo rm -rf /home/winrt/gc/src/out/electron/thinlto-cache
+          mkdir -p /home/winrt/xfer
+          sudo tar -C /home/winrt/gc/src/out -cf - electron | zstd -T0 -3 | split -b 4G - /home/winrt/xfer/out.tar.zst.
+          ls -la /home/winrt/xfer; df -h / /mnt
+
+      - name: Upload output for the next stage
+        if: steps.build.outputs.result == 'continue' || steps.build.outputs.result == 'failed'
+        uses: actions/upload-artifact@v4
+        with:
+          name: out-electron-${{ inputs.stage }}
+          path: /home/winrt/xfer
+          retention-days: 3
+          compression-level: 0
+
+      - name: Build failed
+        if: steps.build.outputs.result == 'failed'
+        run: exit 1
+
+      - name: Package
+        if: steps.build.outputs.result == 'finished'
+        run: |
+          winrt/ci/run python3 /home/winrt/repo/winrt/ci/package.py /home/winrt/gc/src/out/electron /home/winrt/dist
+          mkdir -p "$RUNNER_TEMP/done" && echo "${{ inputs.stage }}" > "$RUNNER_TEMP/done/done"
+
+      - name: Upload package
+        if: steps.build.outputs.result == 'finished'
+        uses: actions/upload-artifact@v4
+        with:
+          name: package-electron
+          path: /home/winrt/dist/*
+          retention-days: 14
+          compression-level: 0
+
+      - name: Mark finished
+        if: steps.build.outputs.result == 'finished'
+        uses: actions/upload-artifact@v4
+        with:
+          name: done-electron
+          path: ${{ runner.temp }}/done
+          retention-days: 2

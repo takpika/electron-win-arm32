@@ -1,0 +1,174 @@
+diff -ruN a/clang/lib/Driver/ToolChains/Clang.cpp b/clang/lib/Driver/ToolChains/Clang.cpp
+--- a/clang/lib/Driver/ToolChains/Clang.cpp	2026-09-26 07:07:04.673784593 +0000
++++ b/clang/lib/Driver/ToolChains/Clang.cpp	2026-09-26 10:28:46.160455013 +0000
+@@ -6755,7 +6755,10 @@
+       } else
+         ImplyVCPPCVer = true;
+     }
+-    else if (IsWindowsMSVC)
++    else if (IsWindowsMSVC ||
++             (D.IsCLMode() && Args.hasArg(options::OPT__SLASH_std)))
++      // clang-cl for other environments (e.g. *-windows-gnu): an explicit
++      // /std: is honored as for C inputs above; the default is unchanged.
+       ImplyVCPPCXXVer = true;
+ 
+     if (IsSYCL && types::isCXX(InputType) &&
+@@ -7719,7 +7722,10 @@
+             << StdArg->getAsString(Args);
+     }
+ 
+-    if (LanguageStandard.empty()) {
++    // The MSVC environment's default standard; other environments (reached
++    // only with an explicit /std:) keep their own default when the /std:
++    // value is not a C++ standard.
++    if (LanguageStandard.empty() && IsWindowsMSVC) {
+       if (IsSYCL)
+         // For SYCL, C++17 is the default.
+         LanguageStandard = "-std=c++17";
+@@ -7729,7 +7735,8 @@
+         LanguageStandard = "-std=c++11";
+     }
+ 
+-    CmdArgs.push_back(LanguageStandard.data());
++    if (!LanguageStandard.empty())
++      CmdArgs.push_back(LanguageStandard.data());
+   }
+ 
+   Args.addOptInFlag(CmdArgs, options::OPT_fborland_extensions,
+diff -ruN a/clang/lib/Driver/ToolChains/MSVC.cpp b/clang/lib/Driver/ToolChains/MSVC.cpp
+--- a/clang/lib/Driver/ToolChains/MSVC.cpp	2026-09-26 05:29:34.137256843 +0000
++++ b/clang/lib/Driver/ToolChains/MSVC.cpp	2026-09-26 05:29:34.141682343 +0000
+@@ -1117,11 +1117,19 @@
+ llvm::opt::DerivedArgList *
+ MSVCToolChain::TranslateArgs(const llvm::opt::DerivedArgList &Args,
+                              BoundArch BA, Action::OffloadKind OFK) const {
++  return TranslateCLArgs(getDriver(), getTriple(), Args, OFK);
++}
++
++llvm::opt::DerivedArgList *
++clang::driver::toolchains::TranslateCLArgs(const Driver &D,
++                                           const llvm::Triple &Triple,
++                                           const llvm::opt::DerivedArgList &Args,
++                                           Action::OffloadKind OFK) {
+   DerivedArgList *DAL = new DerivedArgList(Args.getBaseArgs());
+-  const OptTable &Opts = getDriver().getOpts();
++  const OptTable &Opts = D.getOpts();
+ 
+   // /Oy and /Oy- don't have an effect on X86-64
+-  bool SupportsForcingFramePointer = getArch() != llvm::Triple::x86_64;
++  bool SupportsForcingFramePointer = Triple.getArch() != llvm::Triple::x86_64;
+ 
+   // The -O[12xd] flag actually expands to several flags.  We must desugar the
+   // flags so that options embedded can be negated.  For example, the '-O2' flag
+diff -ruN a/clang/lib/Driver/ToolChains/MSVC.h b/clang/lib/Driver/ToolChains/MSVC.h
+--- a/clang/lib/Driver/ToolChains/MSVC.h	2026-09-26 05:29:34.136197010 +0000
++++ b/clang/lib/Driver/ToolChains/MSVC.h	2026-09-26 05:29:34.141484927 +0000
+@@ -56,6 +56,14 @@
+ 
+ namespace toolchains {
+ 
++/// Desugars the clang-cl options that expand into several driver options (/O,
++/// -D name#value, /permissive and /permissive-). Used by every toolchain that
++/// accepts a clang-cl command line for its triple.
++llvm::opt::DerivedArgList *TranslateCLArgs(const Driver &D,
++                                           const llvm::Triple &Triple,
++                                           const llvm::opt::DerivedArgList &Args,
++                                           Action::OffloadKind OFK);
++
+ class LLVM_LIBRARY_VISIBILITY MSVCToolChain : public ToolChain {
+ public:
+   MSVCToolChain(const Driver &D, const llvm::Triple &Triple,
+diff -ruN a/clang/lib/Driver/ToolChains/MinGW.cpp b/clang/lib/Driver/ToolChains/MinGW.cpp
+--- a/clang/lib/Driver/ToolChains/MinGW.cpp	2026-09-26 05:29:34.138955968 +0000
++++ b/clang/lib/Driver/ToolChains/MinGW.cpp	2026-09-26 05:29:34.149982010 +0000
+@@ -7,6 +7,7 @@
+ //===----------------------------------------------------------------------===//
+ 
+ #include "MinGW.h"
++#include "MSVC.h"
+ #include "clang/Config/config.h"
+ #include "clang/Driver/CommonArgs.h"
+ #include "clang/Driver/Compilation.h"
+@@ -607,6 +608,18 @@
+   return new tools::MinGW::Linker(*this);
+ }
+ 
++llvm::opt::DerivedArgList *
++toolchains::MinGW::TranslateArgs(const llvm::opt::DerivedArgList &Args,
++                                 BoundArch BA,
++                                 Action::OffloadKind DeviceOffloadKind) const {
++  // A clang-cl command line for a MinGW triple: desugar /O, -D name#value and
++  // /permissive[-] exactly as the MSVC toolchain does. Without this they are
++  // accepted and silently ignored (e.g. /O2 compiles at -O0).
++  if (!getDriver().IsCLMode())
++    return nullptr;
++  return TranslateCLArgs(getDriver(), getTriple(), Args, DeviceOffloadKind);
++}
++
+ bool toolchains::MinGW::HasNativeLLVMSupport() const {
+   return NativeLLVMSupport;
+ }
+diff -ruN a/clang/lib/Driver/ToolChains/MinGW.h b/clang/lib/Driver/ToolChains/MinGW.h
+--- a/clang/lib/Driver/ToolChains/MinGW.h	2026-09-26 05:29:34.138197010 +0000
++++ b/clang/lib/Driver/ToolChains/MinGW.h	2026-09-26 05:29:34.141805135 +0000
+@@ -66,6 +66,10 @@
+   static void fixTripleArch(const Driver &D, llvm::Triple &Triple,
+                             const llvm::opt::ArgList &Args);
+ 
++  llvm::opt::DerivedArgList *
++  TranslateArgs(const llvm::opt::DerivedArgList &Args, BoundArch BA,
++                Action::OffloadKind DeviceOffloadKind) const override;
++
+   bool HasNativeLLVMSupport() const override;
+ 
+   UnwindTableLevel
+diff -ruN a/clang/test/Driver/mingw-cl-translate-args.c b/clang/test/Driver/mingw-cl-translate-args.c
+--- a/clang/test/Driver/mingw-cl-translate-args.c	1970-01-01 00:00:00.000000000 +0000
++++ b/clang/test/Driver/mingw-cl-translate-args.c	2026-09-26 10:28:46.161736138 +0000
+@@ -0,0 +1,46 @@
++// clang-cl command lines for a MinGW (*-windows-gnu) triple desugar /O, -D name#value
++// and /permissive[-] like the MSVC toolchain does, and honor an explicit /std:,
++// instead of ignoring them.
++
++// RUN: %clang_cl --target=armv7-w64-windows-gnu /O2 -### -- %s 2>&1 | FileCheck -check-prefix=O2 %s
++// O2-NOT: argument unused during compilation
++// O2: "-O3"
++// O2: "-ffunction-sections"
++
++// RUN: %clang_cl --target=armv7-w64-windows-gnu /O1 -### -- %s 2>&1 | FileCheck -check-prefix=O1 %s
++// O1: "-Os"
++
++// RUN: %clang_cl --target=armv7-w64-windows-gnu /Od -### -- %s 2>&1 | FileCheck -check-prefix=OD %s
++// OD: "-O0"
++
++// RUN: %clang_cl --target=x86_64-w64-windows-gnu /O2 /Oy- -### -- %s 2>&1 | FileCheck -check-prefix=OY %s
++// OY: "-O3"
++
++// RUN: %clang_cl --target=armv7-w64-windows-gnu /O2 /Oy- -### -- %s 2>&1 | FileCheck -check-prefix=OYARM %s
++// OYARM: "-mframe-pointer=all"
++
++// RUN: %clang_cl --target=armv7-w64-windows-gnu -DFOO#BAR -### -- %s 2>&1 | FileCheck -check-prefix=DHASH %s
++// DHASH: "-D" "FOO=BAR"
++
++// RUN: %clang_cl --target=armv7-w64-windows-gnu /TP /std:c++20 -### -- %s 2>&1 | FileCheck -check-prefix=STD20 %s
++// STD20-NOT: argument unused during compilation
++// STD20: "-std=c++20"
++
++// RUN: %clang_cl --target=x86_64-w64-windows-gnu /TP /std:c++17 -### -- %s 2>&1 | FileCheck -check-prefix=STD17 %s
++// STD17: "-std=c++17"
++
++// A /std: that is not a C++ standard leaves the -gnu default (no MSVC default).
++// RUN: %clang_cl --target=armv7-w64-windows-gnu /TP /std:c11 -### -- %s 2>&1 | FileCheck -check-prefix=STDC11 %s
++// STDC11-NOT: "-std=
++// RUN: %clang_cl --target=armv7-w64-windows-gnu /TP /std:c++23 -### -- %s 2>&1 | FileCheck -check-prefix=STDBAD %s
++// STDBAD: argument unused during compilation: '/std:c++23'
++// STDBAD-NOT: "-std=
++
++// (/TP: this file is C, /std:c++ applies to C++ inputs.)
++// Without /std: the -gnu default is kept (no MSVC -std=c++14 default).
++// RUN: %clang_cl --target=armv7-w64-windows-gnu /TP -### -- %s 2>&1 | FileCheck -check-prefix=NOSTD %s
++// NOSTD-NOT: "-std=
++
++// Unchanged outside clang-cl mode.
++// RUN: %clang --target=armv7-w64-windows-gnu -O1 -### -c %s 2>&1 | FileCheck -check-prefix=GNU %s
++// GNU: "-O1"

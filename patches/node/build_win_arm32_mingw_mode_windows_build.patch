@@ -1,0 +1,96 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: takpika <t@takpika.jp>
+Date: Wed, 7 Oct 2026 12:00:00 +0900
+Subject: build: node for Windows on ARM32 (clang-cl, *-windows-gnu)
+
+Windows on ARM32 compiles node with clang-cl for a *-windows-gnu triple, where
+_WIN32 and __MINGW32__ are defined but _MSC_VER is not. Select node's Windows
+headers (and node-gyp's delay-load hook for addons, which only uses Windows
+APIs) by _WIN32 instead of _MSC_VER; state gtest's RTTI detection for the /GR-
+build (gtest reads __GXX_RTTI on this triple); and rename CHECK's static
+AssertionInfo, which shadows a caller's `args` under -Wshadow (as upstream
+nodejs/node e440540431 "src: fix -Wshadow warning").
+
+diff --git a/deps/googletest/BUILD.gn b/deps/googletest/BUILD.gn
+index 0daf8c006cef89e76d7eccec3e924bd2718021c9..63fc780c2342b3fe7172f99dd5e93257c7d93fc7 100644
+--- a/deps/googletest/BUILD.gn
++++ b/deps/googletest/BUILD.gn
+@@ -1,6 +1,16 @@
+ config("gtest_config") {
+   include_dirs = [ "include" ]
+   defines = [ "UNIT_TEST" ]
++
++  if (is_win && target_cpu == "arm") {
++    # Chromium's Windows code builds with /GR- (no RTTI data). gtest-port.h
++    # detects that from _CPPRTTI on an MSVC target; Windows on ARM32
++    # compiles for a *-windows-gnu triple, where it reads __GXX_RTTI instead,
++    # which /GR- leaves defined, and would use dynamic_cast without RTTI
++    # data. State the value it detects on every other Windows build (as
++    # //third_party/googletest:gtest_config does for this target).
++    defines += [ "GTEST_HAS_RTTI=0" ]
++  }
+ }
+ 
+ static_library("gtest") {
+diff --git a/deps/npm/node_modules/node-gyp/src/win_delay_load_hook.cc b/deps/npm/node_modules/node-gyp/src/win_delay_load_hook.cc
+index 169f8029f10fd2ae55764d3c143e35a3b1048ccd..68409ef4928f975036a1957557e074bcd9169835 100644
+--- a/deps/npm/node_modules/node-gyp/src/win_delay_load_hook.cc
++++ b/deps/npm/node_modules/node-gyp/src/win_delay_load_hook.cc
+@@ -7,7 +7,7 @@
+  * This allows compiled addons to work when the host executable is renamed.
+  */
+ 
+-#ifdef _MSC_VER
++#ifdef _WIN32
+ 
+ #pragma managed(push, off)
+ 
+diff --git a/src/node.cc b/src/node.cc
+index 69e817c8031078feecbf49da516b293ac6fbf5b4..82c7eb5dd9739e68dec0b82ea7e4f5166f2a1b17 100644
+--- a/src/node.cc
++++ b/src/node.cc
+@@ -101,7 +101,7 @@
+ #include <sanitizer/lsan_interface.h>
+ #endif
+ 
+-#if defined(_MSC_VER)
++#ifdef _WIN32
+ #include <direct.h>
+ #include <io.h>
+ #define STDIN_FILENO 0
+diff --git a/src/node_process_methods.cc b/src/node_process_methods.cc
+index bc5d41382f20f1f90894b59df68b6ae08096315c..3f9dff8c1983a0b39cd59c5919f3729255fa44cc 100644
+--- a/src/node_process_methods.cc
++++ b/src/node_process_methods.cc
+@@ -22,11 +22,13 @@
+ #include <climits>  // PATH_MAX
+ #include <cstdio>
+ 
+-#if defined(_MSC_VER)
++#ifdef _WIN32
+ #include <direct.h>
+ #include <io.h>
++#if defined(_MSC_VER)
+ #define umask _umask
+ typedef int mode_t;
++#endif
+ #else
+ #include <pthread.h>
+ #include <sys/resource.h>  // getrlimit, setrlimit
+diff --git a/src/util.h b/src/util.h
+index e0175bbe560e3bc401fa3cafe5066e1d045666fa..c3723ab0b3c8f805ad9d552a36ff5f8c98e8432d 100644
+--- a/src/util.h
++++ b/src/util.h
+@@ -127,10 +127,10 @@ void DumpBacktrace(FILE* fp);
+   do {                                                                        \
+     /* Make sure that this struct does not end up in inline code, but      */ \
+     /* rather in a read-only data section when modifying this code.        */ \
+-    static const node::AssertionInfo args = {                                 \
++    static const node::AssertionInfo error_and_abort_args = {                 \
+       __FILE__ ":" STRINGIFY(__LINE__), #expr, PRETTY_FUNCTION_NAME           \
+     };                                                                        \
+-    node::Assert(args);                                                       \
++    node::Assert(error_and_abort_args);                                       \
+   } while (0)
+ 
+ #ifdef __GNUC__

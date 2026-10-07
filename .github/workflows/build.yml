@@ -1,0 +1,133 @@
+# Windows on ARM32 build of Electron (on the Windows on ARM32 port of Chromium). A tag
+# v*-win-arm32 also publishes the release files as a GitHub release.
+name: Build
+on:
+  push:
+    branches: ['**']
+    tags: ['v*-win-arm32*']
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  toolchain:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 358
+    outputs:
+      key: ${{ steps.key.outputs.key }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            winrt
+            patches/chromium
+          fetch-depth: 1
+      - id: key
+        run: echo "key=sdk-${{ hashFiles('winrt/toolchains/**', 'winrt/ci/Dockerfile', 'winrt/ci/toolchain.sh', 'patches/chromium/build_win_arm32_clang_plugins_for_the_toolchain_clang.patch') }}" >> "$GITHUB_OUTPUT"
+      - uses: ./winrt/ci/host
+      - id: cache
+        uses: actions/cache/restore@v4
+        with:
+          key: ${{ steps.key.outputs.key }}
+          path: /home/winrt/sdk
+          lookup-only: true
+      - if: steps.cache.outputs.cache-hit != 'true'
+        uses: ./winrt/ci/image
+      - if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          winrt/ci/run checkout.sh "$GITHUB_SHA"
+          winrt/ci/run toolchain.sh
+          sudo chown -R "$(id -u):$(id -g)" /home/winrt
+      - if: steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          key: ${{ steps.key.outputs.key }}
+          path: /home/winrt/sdk
+
+  s1:
+    needs: [toolchain]
+    uses: ./.github/workflows/stage.yml
+    with:
+      stage: 1
+      sdk_key: ${{ needs.toolchain.outputs.key }}
+
+  s2:
+    needs: [toolchain, s1]
+    uses: ./.github/workflows/stage.yml
+    with:
+      stage: 2
+      sdk_key: ${{ needs.toolchain.outputs.key }}
+
+  s3:
+    needs: [toolchain, s2]
+    uses: ./.github/workflows/stage.yml
+    with:
+      stage: 3
+      sdk_key: ${{ needs.toolchain.outputs.key }}
+
+  s4:
+    needs: [toolchain, s3]
+    uses: ./.github/workflows/stage.yml
+    with:
+      stage: 4
+      sdk_key: ${{ needs.toolchain.outputs.key }}
+
+  s5:
+    needs: [toolchain, s4]
+    uses: ./.github/workflows/stage.yml
+    with:
+      stage: 5
+      sdk_key: ${{ needs.toolchain.outputs.key }}
+
+  s6:
+    needs: [toolchain, s5]
+    uses: ./.github/workflows/stage.yml
+    with:
+      stage: 6
+      sdk_key: ${{ needs.toolchain.outputs.key }}
+
+  s7:
+    needs: [toolchain, s6]
+    uses: ./.github/workflows/stage.yml
+    with:
+      stage: 7
+      sdk_key: ${{ needs.toolchain.outputs.key }}
+
+  s8:
+    needs: [toolchain, s7]
+    uses: ./.github/workflows/stage.yml
+    with:
+      stage: 8
+      sdk_key: ${{ needs.toolchain.outputs.key }}
+
+  release:
+    needs: s8
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: package-*
+          path: dist
+          merge-multiple: true
+      - run: ls -la dist
+      - if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          v=$(ls dist | sed -n 's/^electron-v\(.*\)-win32-armv7l.zip$/\1/p')
+          gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" \
+            --title "$GITHUB_REF_NAME" --notes-file - <<EOF
+          Electron $v for Windows on ARM32 (Windows RT 8.1 / Windows 11 on ARM, 32-bit ARM), built on the
+          Windows on ARM32 port of Chromium (https://github.com/takpika/chromium-win-arm32).
+
+          - electron-v$v-win32-armv7l.zip: Electron (unzip and run electron.exe).
+          - node-v$v-headers.tar.gz, win-armv7l-node.lib: headers and node.lib for building native addons.
+
+          v8_context_snapshot.bin is not included (use_v8_context_snapshot is off for this
+          cross build); Electron starts from snapshot_blob.bin.
+          EOF
