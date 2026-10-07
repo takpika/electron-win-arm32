@@ -1,0 +1,31 @@
+--- a/lld/COFF/DLL.cpp
++++ b/lld/COFF/DLL.cpp
+@@ -659,7 +659,9 @@
+       if (symtab.machine == ARMNT && !e.data)
+         bit = 1;
+       if (e.forwardChunk) {
+-        write32le(p, e.forwardChunk->getRVA() | bit);
++        // A forwarder's entry is the RVA of its "dll.name" string, not of
++        // code, so it never carries the Thumb bit.
++        write32le(p, e.forwardChunk->getRVA());
+       } else {
+         assert(cast<Defined>(e.sym)->getRVA() != 0 &&
+                "Exported symbol unmapped");
+--- a/lld/test/COFF/export-armnt.yaml
++++ b/lld/test/COFF/export-armnt.yaml
+@@ -13,6 +13,15 @@
+ # CHECK-NEXT:       3   0x1009  exportfn2
+ # CHECK-NEXT:       4   0x1009  exportfn3
+ 
++# A forwarded export's RVA points at its name string; it must not get the
++# Thumb bit that code exports get (that would make it "ernel32.foobar").
++# RUN: lld-link /out:%t-fwd.dll /dll %t.obj /export:exportfn1 /export:fwdfn=kernel32.foobar
++# RUN: llvm-objdump -p %t-fwd.dll | FileCheck --check-prefix=FWD %s
++
++# FWD:      Export Table:
++# FWD:      0x1005  exportfn1
++# FWD:      fwdfn (forwarded to kernel32.foobar)
++
+ --- !COFF
+ header:
+   Machine:         IMAGE_FILE_MACHINE_ARMNT

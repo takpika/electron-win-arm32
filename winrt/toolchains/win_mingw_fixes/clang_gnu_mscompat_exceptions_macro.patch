@@ -1,0 +1,36 @@
+diff -ruN a/clang/lib/Frontend/InitPreprocessor.cpp b/clang/lib/Frontend/InitPreprocessor.cpp
+--- a/clang/lib/Frontend/InitPreprocessor.cpp	2026-10-06 15:39:34.099836002 +0000
++++ b/clang/lib/Frontend/InitPreprocessor.cpp	2026-10-06 15:39:34.108743627 +0000
+@@ -1018,7 +1018,12 @@
+     Builder.defineMacro("__BLOCKS__");
+   }
+ 
+-  if (!LangOpts.MSVCCompat && LangOpts.Exceptions)
++  // MSVC compatibility suppresses the GNU __EXCEPTIONS macro because the MSVC
++  // environment defines _CPPUNWIND instead; with GNU compatibility declared
++  // (-fgnuc-version, e.g. clang-cl for a *-windows-gnu triple, where
++  // _CPPUNWIND is not defined) it is the exception macro code tests, as
++  // __GXX_RTTI is below.
++  if (LangOpts.Exceptions && (!LangOpts.MSVCCompat || LangOpts.GNUCVersion))
+     Builder.defineMacro("__EXCEPTIONS");
+   if (LangOpts.GNUCVersion && LangOpts.RTTI)
+     Builder.defineMacro("__GXX_RTTI");
+diff -ruN a/clang/test/Preprocessor/predefined-exceptions-ms-compat.cpp b/clang/test/Preprocessor/predefined-exceptions-ms-compat.cpp
+--- a/clang/test/Preprocessor/predefined-exceptions-ms-compat.cpp	1970-01-01 00:00:00.000000000 +0000
++++ b/clang/test/Preprocessor/predefined-exceptions-ms-compat.cpp	2026-10-06 15:39:34.111099919 +0000
+@@ -0,0 +1,15 @@
++// __EXCEPTIONS under MSVC compatibility: suppressed for the MSVC environment
++// (which defines _CPPUNWIND), defined when GNU compatibility is declared.
++
++// RUN: %clang_cc1 -triple thumbv7-w64-windows-gnu -fms-compatibility -fms-extensions -fgnuc-version=4.2.1 -fexceptions -fcxx-exceptions -E -dM %s | FileCheck -check-prefix=GNU-EH %s
++// GNU-EH: #define __EXCEPTIONS 1
++// GNU-EH: #define __GXX_RTTI 1
++
++// RUN: %clang_cc1 -triple thumbv7-w64-windows-gnu -fms-compatibility -fms-extensions -fgnuc-version=4.2.1 -E -dM %s | FileCheck -check-prefix=GNU-NOEH %s
++// GNU-NOEH-NOT: #define __EXCEPTIONS
++
++// RUN: %clang_cc1 -triple thumbv7-pc-windows-msvc -fms-compatibility -fms-extensions -fexceptions -fcxx-exceptions -E -dM %s | FileCheck -check-prefix=MSVC-EH %s
++// MSVC-EH: #define _CPPUNWIND 1
++
++// RUN: %clang_cc1 -triple thumbv7-pc-windows-msvc -fms-compatibility -fms-extensions -fexceptions -fcxx-exceptions -E -dM %s | FileCheck -check-prefix=MSVC-NOGNU %s
++// MSVC-NOGNU-NOT: #define __EXCEPTIONS

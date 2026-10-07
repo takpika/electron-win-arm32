@@ -1,0 +1,188 @@
+diff -ruN a/clang/lib/Driver/ToolChains/MinGW.cpp b/clang/lib/Driver/ToolChains/MinGW.cpp
+--- a/clang/lib/Driver/ToolChains/MinGW.cpp	2026-09-26 09:43:32.792456466 +0000
++++ b/clang/lib/Driver/ToolChains/MinGW.cpp	2026-09-26 09:43:32.813840924 +0000
+@@ -805,7 +805,11 @@
+                                 options::OPT_fno_sized_deallocation))
+     CC1Args.push_back("-fno-sized-deallocation");
+ 
+-  CC1Args.push_back("-fno-use-init-array");
++  // MinGW's CRT runs .ctors; -fuse-init-array selects the Microsoft C
++  // runtime's initializer tables (.CRT$XCU) for images using that CRT.
++  if (!DriverArgs.hasFlag(options::OPT_fuse_init_array,
++                          options::OPT_fno_use_init_array, false))
++    CC1Args.push_back("-fno-use-init-array");
+ 
+   for (auto Opt : {options::OPT_mthreads, options::OPT_mwindows,
+                    options::OPT_mconsole, options::OPT_mdll}) {
+diff -ruN a/clang/test/Driver/mingw.cpp b/clang/test/Driver/mingw.cpp
+--- a/clang/test/Driver/mingw.cpp	2026-09-26 09:43:32.803247799 +0000
++++ b/clang/test/Driver/mingw.cpp	2026-09-26 09:43:32.813958507 +0000
+@@ -80,6 +80,8 @@
+ 
+ // RUN: %clang --target=i686-windows-gnu -### %s 2>&1 | FileCheck -check-prefix=CHECK_NO_INIT_ARRAY %s
+ // CHECK_NO_INIT_ARRAY: "-fno-use-init-array"
++// RUN: %clang --target=armv7-windows-gnu -fuse-init-array -### %s 2>&1 | FileCheck -check-prefix=CHECK_INIT_ARRAY %s
++// CHECK_INIT_ARRAY-NOT: "-fno-use-init-array"
+ 
+ // RUN: %clang --target=arm64ec-windows-gnu -### -o /dev/null %s 2>&1 \
+ // RUN:   | FileCheck %s --check-prefix CHECK_MINGW_EC_LINK
+diff -ruN a/llvm/include/llvm/CodeGen/TargetLoweringObjectFileImpl.h b/llvm/include/llvm/CodeGen/TargetLoweringObjectFileImpl.h
+--- a/llvm/include/llvm/CodeGen/TargetLoweringObjectFileImpl.h	2026-09-26 09:43:32.785348924 +0000
++++ b/llvm/include/llvm/CodeGen/TargetLoweringObjectFileImpl.h	2026-09-26 09:43:32.810282049 +0000
+@@ -184,6 +184,9 @@
+ class LLVM_ABI TargetLoweringObjectFileCOFF : public TargetLoweringObjectFile {
+   mutable unsigned NextUniqueID = 0;
+   const TargetMachine *TM = nullptr;
++  /// Static constructors/destructors go to .CRT$XC*/.CRT$XT* (run by the
++  /// Microsoft C runtime) instead of .ctors/.dtors (run by MinGW's __main).
++  bool UseCRTStructorSections = false;
+ 
+ public:
+   ~TargetLoweringObjectFileCOFF() override = default;
+diff -ruN a/llvm/lib/CodeGen/TargetLoweringObjectFileImpl.cpp b/llvm/lib/CodeGen/TargetLoweringObjectFileImpl.cpp
+--- a/llvm/lib/CodeGen/TargetLoweringObjectFileImpl.cpp	2026-09-26 09:43:32.788700007 +0000
++++ b/llvm/lib/CodeGen/TargetLoweringObjectFileImpl.cpp	2026-09-26 09:43:32.813753091 +0000
+@@ -2019,7 +2019,14 @@
+   TargetLoweringObjectFile::Initialize(Ctx, TM);
+   this->TM = &TM;
+   const Triple &T = TM.getTargetTriple();
+-  if (T.isWindowsMSVCEnvironment() || T.isWindowsItaniumEnvironment()) {
++  // MinGW normally uses .ctors/.dtors, run by its CRT's __main; with
++  // UseInitArray (clang -fuse-init-array) a *-windows-gnu object uses the
++  // Microsoft C runtime's initializer tables instead, for images whose startup
++  // code is the Microsoft CRT's (e.g. linked against its static CRT).
++  UseCRTStructorSections =
++      T.isWindowsMSVCEnvironment() || T.isWindowsItaniumEnvironment() ||
++      (T.isWindowsGNUEnvironment() && TM.Options.UseInitArray);
++  if (UseCRTStructorSections) {
+     StaticCtorSection =
+         Ctx.getCOFFSection(".CRT$XCU", COFF::IMAGE_SCN_CNT_INITIALIZED_DATA |
+                                            COFF::IMAGE_SCN_MEM_READ);
+@@ -2037,11 +2044,12 @@
+ }
+ 
+ static MCSectionCOFF *getCOFFStaticStructorSection(MCContext &Ctx,
+-                                                   const Triple &T, bool IsCtor,
++                                                   bool UseCRTSections,
++                                                   bool IsCtor,
+                                                    unsigned Priority,
+                                                    const MCSymbol *KeySym,
+                                                    MCSectionCOFF *Default) {
+-  if (T.isWindowsMSVCEnvironment() || T.isWindowsItaniumEnvironment()) {
++  if (UseCRTSections) {
+     // If the priority is the default, use .CRT$XCU, possibly associative.
+     if (Priority == 65535)
+       return Ctx.getAssociativeCOFFSection(Default, KeySym, 0);
+@@ -2088,14 +2096,14 @@
+ MCSection *TargetLoweringObjectFileCOFF::getStaticCtorSection(
+     unsigned Priority, const MCSymbol *KeySym) const {
+   return getCOFFStaticStructorSection(
+-      getContext(), getContext().getTargetTriple(), true, Priority, KeySym,
++      getContext(), UseCRTStructorSections, true, Priority, KeySym,
+       static_cast<MCSectionCOFF *>(StaticCtorSection));
+ }
+ 
+ MCSection *TargetLoweringObjectFileCOFF::getStaticDtorSection(
+     unsigned Priority, const MCSymbol *KeySym) const {
+   return getCOFFStaticStructorSection(
+-      getContext(), getContext().getTargetTriple(), false, Priority, KeySym,
++      getContext(), UseCRTStructorSections, false, Priority, KeySym,
+       static_cast<MCSectionCOFF *>(StaticDtorSection));
+ }
+ 
+diff -ruN a/llvm/test/CodeGen/ARM/Windows/structors.ll b/llvm/test/CodeGen/ARM/Windows/structors.ll
+--- a/llvm/test/CodeGen/ARM/Windows/structors.ll	2026-09-26 09:43:32.795515674 +0000
++++ b/llvm/test/CodeGen/ARM/Windows/structors.ll	2026-09-26 09:43:32.813883716 +0000
+@@ -1,9 +1,12 @@
+ ; RUN: llc -mtriple thumbv7-windows-itanium -o - %s \
+ ; RUN:   | FileCheck %s -check-prefix CHECK-WIN
+ 
+-; RUN: llc -mtriple thumbv7-windows-gnu -o - %s \
++; RUN: llc -mtriple thumbv7-windows-gnu -use-ctors -o - %s \
+ ; RUN:   | FileCheck %s -check-prefix CHECK-GNU
+ 
++; RUN: llc -mtriple thumbv7-windows-gnu -use-ctors=false -o - %s \
++; RUN:   | FileCheck %s -check-prefix CHECK-WIN
++
+ @llvm.global_ctors = appending global [1 x { i32, ptr, ptr }] [{ i32, ptr, ptr } { i32 65535, ptr @function, ptr null }]
+ 
+ define arm_aapcs_vfpcc void @function() {
+diff -ruN a/llvm/test/CodeGen/X86/pr24374.ll b/llvm/test/CodeGen/X86/pr24374.ll
+--- a/llvm/test/CodeGen/X86/pr24374.ll	2026-09-26 09:43:32.798301174 +0000
++++ b/llvm/test/CodeGen/X86/pr24374.ll	2026-09-26 09:43:32.813908091 +0000
+@@ -1,4 +1,4 @@
+-; RUN: llc < %s | FileCheck %s
++; RUN: llc -use-ctors < %s | FileCheck %s
+ target datalayout = "e-m:w-i64:64-f80:128-n8:16:32:64-S128"
+ target triple = "x86_64-w64-windows-gnu"
+ 
+diff -ruN a/llvm/test/MC/COFF/global_ctors_dtors.ll b/llvm/test/MC/COFF/global_ctors_dtors.ll
+--- a/llvm/test/MC/COFF/global_ctors_dtors.ll	2026-09-26 09:43:32.800873132 +0000
++++ b/llvm/test/MC/COFF/global_ctors_dtors.ll	2026-09-26 09:57:37.054320759 +0000
+@@ -2,8 +2,11 @@
+ ; target. Mingw uses .ctors, whereas MSVC uses .CRT$XC*.
+ ; RUN: llc < %s -mtriple i686-pc-win32 | FileCheck %s --check-prefix WIN32
+ ; RUN: llc < %s -mtriple x86_64-pc-win32 | FileCheck %s --check-prefix WIN32
+-; RUN: llc < %s -mtriple i686-pc-mingw32 | FileCheck %s --check-prefix MINGW32
+-; RUN: llc < %s -mtriple x86_64-pc-mingw32 | FileCheck %s --check-prefix MINGW32
++; RUN: llc < %s -mtriple i686-pc-mingw32 -use-ctors | FileCheck %s --check-prefix MINGW32
++; RUN: llc < %s -mtriple x86_64-pc-mingw32 -use-ctors | FileCheck %s --check-prefix MINGW32
++; With init arrays (clang -fuse-init-array) MinGW objects use the MSVC CRT's tables.
++; RUN: llc < %s -mtriple i686-pc-mingw32 -use-ctors=false | FileCheck %s --check-prefix WIN32
++; RUN: llc < %s -mtriple x86_64-pc-mingw32 -use-ctors=false | FileCheck %s --check-prefix WIN32
+ 
+ @.str = private unnamed_addr constant [13 x i8] c"constructing\00", align 1
+ @.str2 = private unnamed_addr constant [12 x i8] c"destructing\00", align 1
+@@ -56,10 +59,11 @@
+ ; WIN32-NOT: c_global_ctor
+ ; WIN32: .section .CRT$XTX,"dr"
+ ; WIN32: a_global_dtor
+-; MINGW32: .section .ctors,"dw"
+-; MINGW32: a_global_ctor
++; .ctors are emitted in reverse order (MinGW's CRT runs them from the end).
+ ; MINGW32: .section .ctors,"dw",associative,{{_?}}b,unique,0
+ ; MINGW32: b_global_ctor
++; MINGW32: .section .ctors,"dw",unique,0
++; MINGW32: a_global_ctor
+ ; MINGW32-NOT: c_global_ctor
+-; MINGW32: .section .dtors,"dw"
++; MINGW32: .section .dtors,"dw",unique,0
+ ; MINGW32: a_global_dtor
+diff --git a/llvm/lib/Target/X86/X86ISelDAGToDAG.cpp b/llvm/lib/Target/X86/X86ISelDAGToDAG.cpp
+--- a/llvm/lib/Target/X86/X86ISelDAGToDAG.cpp
++++ b/llvm/lib/Target/X86/X86ISelDAGToDAG.cpp
+@@ -1808,7 +1808,11 @@
+ 
+ /// Emit any code that needs to be executed only in the main function.
+ void X86DAGToDAGISel::emitSpecialCodeForMain() {
+-  if (Subtarget->isTargetCygMing()) {
++  // __main runs the .ctors table. A MinGW object compiled with UseInitArray
++  // puts its constructors in .CRT$XC* instead (TargetLoweringObjectFileCOFF),
++  // which the C runtime's startup runs, so main does not call __main.
++  if (Subtarget->isTargetCygMing() &&
++      !(Subtarget->isTargetWindowsGNU() && TM.Options.UseInitArray)) {
+     TargetLowering::ArgListTy Args;
+     auto &DL = CurDAG->getDataLayout();
+ 
+diff --git a/llvm/test/CodeGen/X86/mingw-main-init-array.ll b/llvm/test/CodeGen/X86/mingw-main-init-array.ll
+new file mode 100644
+--- /dev/null
++++ b/llvm/test/CodeGen/X86/mingw-main-init-array.ll
+@@ -0,0 +1,17 @@
++; main calls __main, which runs .ctors, unless a MinGW object's constructors are
++; in .CRT$XC* (UseInitArray, i.e. llc's default; -use-ctors selects .ctors).
++; RUN: llc -mtriple=x86_64-w64-mingw32 -use-ctors < %s | FileCheck %s --check-prefix=MAIN
++; RUN: llc -mtriple=i686-w64-mingw32 -use-ctors < %s | FileCheck %s --check-prefix=MAIN
++; RUN: llc -mtriple=x86_64-w64-mingw32 -use-ctors=false < %s | FileCheck %s --check-prefix=NOMAIN
++; RUN: llc -mtriple=i686-w64-mingw32 -use-ctors=false < %s | FileCheck %s --check-prefix=NOMAIN
++; RUN: llc -mtriple=x86_64-pc-cygwin -use-ctors=false < %s | FileCheck %s --check-prefix=MAIN
++
++define i32 @main() {
++entry:
++  ret i32 0
++}
++
++; MAIN-LABEL: main:
++; MAIN: call{{[lq]?}} {{_?}}__main
++; NOMAIN-LABEL: main:
++; NOMAIN-NOT: __main

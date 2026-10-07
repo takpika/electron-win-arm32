@@ -1,0 +1,54 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: takpika <t@takpika.jp>
+Date: Wed, 7 Oct 2026 12:00:00 +0900
+Subject: build: Chromium clang plugins for the win-arm32 toolchain's clang
+
+The win-arm32 toolchain compiles Chromium's clang plugins against its own
+clang (LLVM 23), whose TemplateSpecializationType gives its arguments as
+template_arguments() only. Use it; the plugins' checks stay as the Chromium
+port calibrated them.
+
+diff --git a/tools/clang/plugins/CheckIPCVisitor.cpp b/tools/clang/plugins/CheckIPCVisitor.cpp
+index 7d1b9266d6cf4e5a99a61d23618d60d41cb1545b..463c97cfaa4c1a3821f0a57b6d9911f60025c490 100644
+--- a/tools/clang/plugins/CheckIPCVisitor.cpp
++++ b/tools/clang/plugins/CheckIPCVisitor.cpp
+@@ -138,8 +138,7 @@ bool CheckIPCVisitor::ValidateCheckedTuple(
+   }
+ 
+   bool valid = true;
+-  for (unsigned i = 0; i != spec->getNumArgs(); ++i) {
+-    const TemplateArgument& arg = spec->getArg(i);
++  for (const TemplateArgument& arg : spec->template_arguments()) {
+     CheckDetails details;
+     if (CheckTemplateArgument(arg, &details)) {
+       continue;
+@@ -222,7 +221,7 @@ bool CheckIPCVisitor::CheckType(QualType type, CheckDetails* details) const {
+ 
+   while (true) {
+     if (auto* spec = dyn_cast<TemplateSpecializationType>(type)) {
+-      for (const TemplateArgument& arg: *spec) {
++      for (const TemplateArgument& arg : spec->template_arguments()) {
+         if (!CheckTemplateArgument(arg, details)) {
+           return false;
+         }
+diff --git a/tools/clang/plugins/FindBadConstructsConsumer.cpp b/tools/clang/plugins/FindBadConstructsConsumer.cpp
+index 28f801cf5751b70da9a3cc6f23c7f7d3ae35361e..7766fcf94008025652991dd3f003b4e1d6013022 100644
+--- a/tools/clang/plugins/FindBadConstructsConsumer.cpp
++++ b/tools/clang/plugins/FindBadConstructsConsumer.cpp
+@@ -1038,12 +1036,14 @@ void FindBadConstructsConsumer::CheckWeakPtrFactoryMembers(
+     if (template_spec_type) {
+       const TemplateDecl* template_decl =
+           template_spec_type->getTemplateName().getAsTemplateDecl();
+-      if (template_decl && template_spec_type->getNumArgs() == 1) {
++      if (template_decl &&
++          template_spec_type->template_arguments().size() == 1) {
+         if (template_decl->getNameAsString().compare("WeakPtrFactory") == 0 &&
+             GetNamespace(template_decl) == "base") {
+           // Only consider WeakPtrFactory members which are specialized for the
+           // owning class.
+-          const TemplateArgument& arg = template_spec_type->getArg(0);
++          const TemplateArgument& arg =
++              template_spec_type->template_arguments()[0];
+           if (arg.getAsType().getTypePtr()->getAsCXXRecordDecl() ==
+               instance()
+                   .getASTContext()

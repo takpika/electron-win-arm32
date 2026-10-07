@@ -184,8 +184,15 @@ int NodeMain(int argc, char* argv[]) {
     crash_keys::SetPlatformCrashKey();
 #endif
 
+    // The snapshot this build ships, as content's GetSnapshotType chooses it
+    // (content/app/content_main_runner_impl.cc): v8_context_snapshot.bin with
+    // use_v8_context_snapshot, otherwise snapshot_blob.bin.
+#if defined(USE_V8_CONTEXT_SNAPSHOT)
     gin::V8Initializer::LoadV8Snapshot(
         gin::V8SnapshotFileType::kWithAdditionalContext);
+#else
+    gin::V8Initializer::LoadV8Snapshot(gin::V8SnapshotFileType::kDefault);
+#endif
 
     // V8 requires a task scheduler.
     base::ThreadPoolInstance::CreateAndStartWithDefaultParams("Electron");

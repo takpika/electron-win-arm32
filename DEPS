@@ -3,6 +3,12 @@ gclient_gn_args_from = 'src'
 vars = {
   'chromium_version':
     '108.0.5359.215',
+  # Chromium <chromium_version> for Windows on ARM32: the port's branch
+  # winarm32-<chromium_version> of chromium_win_arm32_git, at this commit.
+  'chromium_win_arm32_git':
+    'https://github.com/takpika/chromium-win-arm32.git',
+  'chromium_win_arm32_commit':
+    'f7700726d76ac682b79a875e4f0621b21e902152',
   'node_version':
     'v16.17.1',
   'nan_version':
@@ -67,7 +73,7 @@ vars = {
 
 deps = {
   'src': {
-    'url': (Var("chromium_git")) + '/chromium/src.git@' + (Var("chromium_version")),
+    'url': Var("chromium_win_arm32_git") + '@' + Var("chromium_win_arm32_commit"),
     'condition': 'checkout_chromium and process_deps',
   },
   'src/third_party/nan': {

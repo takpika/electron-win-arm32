@@ -1,0 +1,33 @@
+--- a/llvm/lib/Target/ARM/ARMBaseRegisterInfo.h
++++ b/llvm/lib/Target/ARM/ARMBaseRegisterInfo.h
+@@ -89,6 +89,7 @@
+                        MCRegister PhysReg) const override;
+   bool isInlineAsmReadOnlyReg(const MachineFunction &MF,
+                               MCRegister PhysReg) const override;
++  bool isIgnoredCVReg(MCRegister LLVMReg) const override;
+ 
+   const TargetRegisterClass *
+   getPointerRegClass(unsigned Kind = 0) const override;
+--- a/llvm/lib/Target/ARM/ARMBaseRegisterInfo.cpp
++++ b/llvm/lib/Target/ARM/ARMBaseRegisterInfo.cpp
+@@ -279,6 +279,20 @@
+   return Reserved.test(PhysReg.id());
+ }
+ 
++bool ARMBaseRegisterInfo::isIgnoredCVReg(MCRegister LLVMReg) const {
++  // CodeView encodes only the registers ARM_MC::initLLVMToCVRegMapping maps:
++  // r0-r12, sp, lr, pc, s0-s31, d0-d31, q0-q15, CPSR, FPSCR and FPEXC. A
++  // variable located in any other register -- a NEON register tuple such as
++  // d25_d26 (vld2/vst2), a GPR pair, an MVE or PAC register -- has no
++  // encoding, so CodeViewDebug drops that location instead of failing with
++  // "unknown codeview register".
++  return !(ARM::GPRRegClass.contains(LLVMReg) ||
++           ARM::SPRRegClass.contains(LLVMReg) ||
++           ARM::DPRRegClass.contains(LLVMReg) ||
++           ARM::QPRRegClass.contains(LLVMReg) || LLVMReg == ARM::CPSR ||
++           LLVMReg == ARM::FPSCR || LLVMReg == ARM::FPEXC);
++}
++
+ const TargetRegisterClass *
+ ARMBaseRegisterInfo::getLargestLegalSuperClass(const TargetRegisterClass *RC,
+                                                const MachineFunction &MF) const {

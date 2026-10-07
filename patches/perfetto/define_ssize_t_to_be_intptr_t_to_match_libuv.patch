@@ -8,18 +8,22 @@ This definition conflicts with libuv's: https://github.com/libuv/libuv/blob/bb0b
 Breaks the build on 32-bit windows.
 
 diff --git a/include/perfetto/ext/base/sys_types.h b/include/perfetto/ext/base/sys_types.h
-index 999a1522f4397def080ad0056ff3f626e2f0cdbe..a3e24ae047a2185b66136184e95427e6e849194f 100644
+index 3db21c2e578c37f561a2a31a0048fc321393b76b..a3e24ae047a2185b66136184e95427e6e849194f 100644
 --- a/include/perfetto/ext/base/sys_types.h
 +++ b/include/perfetto/ext/base/sys_types.h
-@@ -32,11 +32,7 @@ using uid_t = unsigned int;
+@@ -32,15 +32,7 @@ using uid_t = unsigned int;
  using pid_t = int;
  #endif  // !GCC
  
+-// MinGW-w64's CRT headers already define ssize_t (int on 32-bit, __int64 on
+-// 64-bit); a second, different typedef would conflict on 32-bit.
+-#if !defined(__MINGW32__)
 -#if defined(_WIN64)
 -using ssize_t = int64_t;
 -#else
 -using ssize_t = long;
 -#endif  // _WIN64
+-#endif  // !__MINGW32__
 +using ssize_t = intptr_t;
  
  #endif  // OS_WIN
