@@ -1,0 +1,154 @@
+diff --git a/lld/COFF/InputFiles.cpp b/lld/COFF/InputFiles.cpp
+--- a/lld/COFF/InputFiles.cpp
++++ b/lld/COFF/InputFiles.cpp
+@@ -449,6 +449,8 @@
+     debugChunks.push_back(c);
+   else if (name == ".gfids$y")
+     guardFidChunks.push_back(c);
++  else if (name == ".gfids$x")
++    guardFidRelocChunks.push_back(c);
+   else if (name == ".giats$y")
+     guardIATChunks.push_back(c);
+   else if (name == ".gljmp$y")
+diff --git a/lld/COFF/InputFiles.h b/lld/COFF/InputFiles.h
+--- a/lld/COFF/InputFiles.h
++++ b/lld/COFF/InputFiles.h
+@@ -156,6 +156,9 @@
+   ArrayRef<SectionChunk *> getDebugChunks() { return debugChunks; }
+   ArrayRef<SectionChunk *> getSXDataChunks() { return sxDataChunks; }
+   ArrayRef<SectionChunk *> getGuardFidChunks() { return guardFidChunks; }
++  ArrayRef<SectionChunk *> getGuardFidRelocChunks() {
++    return guardFidRelocChunks;
++  }
+   ArrayRef<SectionChunk *> getGuardIATChunks() { return guardIATChunks; }
+   ArrayRef<SectionChunk *> getGuardLJmpChunks() { return guardLJmpChunks; }
+   ArrayRef<SectionChunk *> getGuardEHContChunks() { return guardEHContChunks; }
+@@ -307,6 +310,11 @@
+   // taken IAT entries, longjmp and ehcont targets. These are not linked into
+   // the final binary when /guard:cf is set.
+   std::vector<SectionChunk *> guardFidChunks;
++  // Address taken symbols given as relocations (one IMAGE_REL_*_ADDR32NB per
++  // function) instead of symbol table indices: the .gfids$x sections of, e.g.,
++  // the Windows SDK's x64 UCRT objects. Not linked into the final binary
++  // either.
++  std::vector<SectionChunk *> guardFidRelocChunks;
+   std::vector<SectionChunk *> guardIATChunks;
+   std::vector<SectionChunk *> guardLJmpChunks;
+   std::vector<SectionChunk *> guardEHContChunks;
+diff --git a/lld/COFF/Writer.cpp b/lld/COFF/Writer.cpp
+--- a/lld/COFF/Writer.cpp
++++ b/lld/COFF/Writer.cpp
+@@ -249,6 +249,9 @@
+   void markSymbolsForRVATable(ObjFile *file,
+                               ArrayRef<SectionChunk *> symIdxChunks,
+                               SymbolRVASet &tableSymbols);
++  void markRelocationTargetsForRVATable(ObjFile *file,
++                                        ArrayRef<SectionChunk *> relocChunks,
++                                        SymbolRVASet &tableSymbols);
+   void getSymbolsFromSections(ObjFile *file,
+                               ArrayRef<SectionChunk *> symIdxChunks,
+                               std::vector<Symbol *> &symbols);
+@@ -2207,6 +2210,8 @@
+     // possibly address-taken.
+     if (file->hasGuardCF()) {
+       markSymbolsForRVATable(file, file->getGuardFidChunks(), addressTakenSyms);
++      markRelocationTargetsForRVATable(file, file->getGuardFidRelocChunks(),
++                                       addressTakenSyms);
+       markSymbolsForRVATable(file, file->getGuardIATChunks(), giatsRVASet);
+       getSymbolsFromSections(file, file->getGuardIATChunks(), giatsSymbols);
+       markSymbolsForRVATable(file, file->getGuardLJmpChunks(), longJmpTargets);
+@@ -2328,6 +2333,21 @@
+     addSymbolToRVASet(tableSymbols, cast<Defined>(s));
+ }
+ 
++// Take a list of input sections whose relocations point at functions (.gfids$x)
++// and add those functions to an RVA table.
++void Writer::markRelocationTargetsForRVATable(
++    ObjFile *file, ArrayRef<SectionChunk *> relocChunks,
++    SymbolRVASet &tableSymbols) {
++  for (SectionChunk *c : relocChunks) {
++    // As for .gfids$y: a section discarded by linker GC marks nothing.
++    if (!c->live)
++      continue;
++    for (const coff_relocation &reloc : c->getRelocs())
++      maybeAddAddressTakenFunction(tableSymbols,
++                                   file->getSymbol(reloc.SymbolTableIndex));
++  }
++}
++
+ // Replace the absolute table symbol with a synthetic symbol pointing to
+ // tableChunk so that we can emit base relocations for it and resolve section
+ // relative relocations.
+diff --git a/lld/test/COFF/gfids-x.s b/lld/test/COFF/gfids-x.s
+new file mode 100644
+--- /dev/null
++++ b/lld/test/COFF/gfids-x.s
+@@ -0,0 +1,68 @@
++# REQUIRES: x86
++# RUN: llvm-mc -triple x86_64-windows-msvc %s -filetype=obj -o %t.obj
++# RUN: lld-link %t.obj -guard:cf,nolongjmp -out:%t.exe -opt:noref -entry:main
++# RUN: llvm-readobj --sections --coff-load-config %t.exe | FileCheck %s
++
++# A /guard:cf object (@feat.00 0x800) can list its address-taken functions in a
++# .gfids$x section as ADDR32NB relocations instead of .gfids$y symbol indices
++# (the Windows SDK's x64 UCRT objects do so for the initializers the CRT calls
++# through the CFG check). f is listed that way, g is only called directly:
++# the table holds main (the entry) and f, and .gfids$x is not linked into the
++# image.
++
++# CHECK-NOT: Name: .gfids
++# CHECK:   GuardCFFunctionCount: 2
++# CHECK:      GuardFidTable [
++# CHECK-NEXT:   0x140001000
++# CHECK-NEXT:   0x140001010
++# CHECK-NEXT: ]
++
++        .def     @feat.00;
++        .scl    3;
++        .type   0;
++        .endef
++        .globl  @feat.00
++@feat.00 = 0x801
++
++        .def     main;
++        .scl    2;
++        .type   32;
++        .endef
++        .section        .text,"xr",one_only,main
++        .globl  main
++main:
++        callq g
++        retq
++
++        .def     f;
++        .scl    3;
++        .type   32;
++        .endef
++        .section        .text,"xr",one_only,f
++        .p2align 4
++f:
++        movl $42, %eax
++        retq
++
++        .def     g;
++        .scl    3;
++        .type   32;
++        .endef
++        .section        .text,"xr",one_only,g
++        .p2align 4
++g:
++        movl $13, %eax
++        retq
++
++        .section        .gfids$x,"dr"
++        .rva f
++
++        .section .rdata,"dr"
++.globl _load_config_used
++_load_config_used:
++        .long 256
++        .fill 124, 1, 0
++        .quad __guard_fids_table
++        .quad __guard_fids_count
++        .long __guard_flags
++        .fill 128, 1, 0

@@ -1,0 +1,38 @@
+diff --git a/llvm/lib/ToolDrivers/llvm-lib/LibDriver.cpp b/llvm/lib/ToolDrivers/llvm-lib/LibDriver.cpp
+--- a/llvm/lib/ToolDrivers/llvm-lib/LibDriver.cpp
++++ b/llvm/lib/ToolDrivers/llvm-lib/LibDriver.cpp
+@@ -192,6 +192,7 @@
+   case Triple::x86_64:
+     return COFF::IMAGE_FILE_MACHINE_AMD64;
+   case Triple::arm:
++  case Triple::thumb:
+     return COFF::IMAGE_FILE_MACHINE_ARMNT;
+   case Triple::aarch64:
+     return T.isWindowsArm64EC() ? COFF::IMAGE_FILE_MACHINE_ARM64EC
+diff --git a/llvm/test/tools/llvm-lib/Inputs/thumbv7.ll b/llvm/test/tools/llvm-lib/Inputs/thumbv7.ll
+new file mode 100644
+--- /dev/null
++++ b/llvm/test/tools/llvm-lib/Inputs/thumbv7.ll
+@@ -0,0 +1,2 @@
++target triple = "thumbv7-w64-windows-gnu"
++@thumbv7 = global i32 1
+diff --git a/llvm/test/tools/llvm-lib/thumb-bitcode.test b/llvm/test/tools/llvm-lib/thumb-bitcode.test
+new file mode 100644
+--- /dev/null
++++ b/llvm/test/tools/llvm-lib/thumb-bitcode.test
+@@ -0,0 +1,15 @@
++REQUIRES: arm-registered-target
++
++Windows on 32-bit ARM is Thumb-2 only, so clang (clang-cl or a *-windows-gnu
++driver, -flto) emits bitcode with a thumbv7 triple; llvm-lib must give it the
++ARMNT machine type, as lld-link does, not reject the triple.
++
++RUN: rm -rf %t && mkdir -p %t
++RUN: llvm-as -o %t/thumbv7.bc %S/Inputs/thumbv7.ll
++RUN: llvm-mc -triple=thumbv7-windows-gnu -filetype=obj -o %t/arm.obj %S/Inputs/a.s
++RUN: llvm-lib /out:%t/a.lib %t/thumbv7.bc
++RUN: llvm-lib /llvmlibthin /out:%t/thin.lib %t/arm.obj %t/thumbv7.bc
++RUN: llvm-lib /machine:arm /out:%t/m.lib %t/thumbv7.bc
++RUN: not llvm-lib /machine:x64 /out:%t/x.lib %t/thumbv7.bc 2>&1 | FileCheck %s
++
++CHECK: {{.*}}thumbv7.bc: file machine type arm conflicts with library machine type x64 (from '/machine:x64' flag)

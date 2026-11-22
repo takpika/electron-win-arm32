@@ -1,0 +1,49 @@
+diff --git a/llvm/lib/Target/ARM/Thumb2InstrInfo.cpp b/llvm/lib/Target/ARM/Thumb2InstrInfo.cpp
+--- a/llvm/lib/Target/ARM/Thumb2InstrInfo.cpp
++++ b/llvm/lib/Target/ARM/Thumb2InstrInfo.cpp
+@@ -263,6 +263,14 @@
+ 
+   const auto *GV = cast<GlobalValue>((*MI->memoperands_begin())->getValue());
+   const ARMSubtarget &Subtarget = MF.getSubtarget<ARMSubtarget>();
++  // Windows on ARM addresses globals with absolute movw/movt pairs
++  // (IMAGE_REL_ARM_MOV32T) whatever the relocation model, as
++  // LowerGlobalAddressWindows does; COFF cannot represent the pc-relative
++  // form.
++  if (Subtarget.isTargetWindows()) {
++    expandLoadStackGuardBase(MI, ARM::t2MOVi32imm, ARM::t2LDRi12);
++    return;
++  }
+   bool IsPIC = MF.getTarget().isPositionIndependent();
+   if (Subtarget.isTargetELF() && !GV->isDSOLocal())
+     expandLoadStackGuardBase(MI, ARM::t2LDRLIT_ga_pcrel, ARM::t2LDRi12);
+diff --git a/llvm/test/CodeGen/ARM/Windows/pic.ll b/llvm/test/CodeGen/ARM/Windows/pic.ll
+--- a/llvm/test/CodeGen/ARM/Windows/pic.ll
++++ b/llvm/test/CodeGen/ARM/Windows/pic.ll
+@@ -4,6 +4,8 @@
+ ; RUN: llc -mtriple thumbv7-windows-gnu -relocation-model pic -filetype asm -o - %s \
+ ; RUN:   | FileCheck %s -check-prefix CHECK-GNU
+ 
++; RUN: llc -mtriple thumbv7-windows-gnu -relocation-model pic -filetype obj -o /dev/null %s
++
+ @external = external global i8
+ 
+ define arm_aapcs_vfpcc i8 @return_external() {
+@@ -22,3 +24,18 @@
+ ; CHECK-GNU: movt r0, :upper16:.refptr.external
+ ; CHECK-GNU: ldr  r0, [r0]
+ ; CHECK-GNU: ldrb r0, [r0]
++
++declare void @use(ptr)
++
++define arm_aapcs_vfpcc void @stack_guard() sspreq {
++entry:
++  %buf = alloca [16 x i8], align 1
++  call void @use(ptr %buf)
++  ret void
++}
++
++; CHECK-GNU-LABEL: stack_guard
++; CHECK-GNU: movw [[REG:r[0-9]+]], :lower16:.refptr.__stack_chk_guard
++; CHECK-GNU: movt [[REG]], :upper16:.refptr.__stack_chk_guard
++; CHECK-GNU: ldr [[PTR:r[0-9]+]], {{\[}}[[REG]]{{\]}}
++; CHECK-GNU: ldr {{r[0-9]+}}, {{\[}}[[PTR]]{{\]}}

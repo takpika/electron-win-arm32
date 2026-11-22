@@ -1,0 +1,58 @@
+diff --git a/lld/COFF/DLL.cpp b/lld/COFF/DLL.cpp
+index 10bc89824..6e1e07a17 100644
+--- a/lld/COFF/DLL.cpp
++++ b/lld/COFF/DLL.cpp
+@@ -306,7 +306,9 @@ static const uint8_t tailMergeARM[] = {
+     0x61, 0x46,             // mov     r1, ip
+     0x40, 0xf2, 0x00, 0x00, // mov.w   r0, #0 DELAY_IMPORT_DESCRIPTOR
+     0xc0, 0xf2, 0x00, 0x00, // mov.t   r0, #0 DELAY_IMPORT_DESCRIPTOR
+-    0x00, 0xf0, 0x00, 0xd0, // bl      #0 __delayLoadHelper2
++    0x40, 0xf2, 0x00, 0x0c, // mov.w   ip, #0 __delayLoadHelper2
++    0xc0, 0xf2, 0x00, 0x0c, // mov.t   ip, #0 __delayLoadHelper2
++    0xe0, 0x47,             // blx     ip
+     0x84, 0x46,             // mov     ip, r0
+     0xbd, 0xec, 0x10, 0x0b, // vpop    {d0, d1, d2, d3, d4, d5, d6, d7}
+     0xbd, 0xe8, 0x0f, 0x48, // pop.w   {r0, r1, r2, r3, r11, lr}
+@@ -513,11 +515,15 @@ public:
+   void writeTo(uint8_t *buf) const override {
+     memcpy(buf, tailMergeARM, sizeof(tailMergeARM));
+     applyMOV32T(buf + 14, desc->getRVA() + ctx.config.imageBase);
+-    applyBranch24T(buf + 22, helper->getRVA() - rva - 26);
++    // Absolute address (Thumb bit set) instead of a bl: __delayLoadHelper2 can be
++    // more than +-16MB away in a large image, and synthesized chunks get no
++    // range-extension thunks.
++    applyMOV32T(buf + 22, (helper->getRVA() + ctx.config.imageBase) | 1);
+   }
+ 
+   void getBaserels(std::vector<Baserel> *res) override {
+     res->emplace_back(rva + 14, IMAGE_REL_BASED_ARM_MOV32T);
++    res->emplace_back(rva + 22, IMAGE_REL_BASED_ARM_MOV32T);
+   }
+ 
+   Chunk *desc = nullptr;
+diff --git a/lld/test/COFF/delayimports-armnt.yaml b/lld/test/COFF/delayimports-armnt.yaml
+index ea96d864e..b34d1733e 100644
+--- a/lld/test/COFF/delayimports-armnt.yaml
++++ b/lld/test/COFF/delayimports-armnt.yaml
+@@ -39,8 +39,8 @@
+ # BASEREL-NEXT:     Address: 0x1026
+ # BASEREL-NEXT:   }
+ # BASEREL-NEXT:   Entry {
+-# BASEREL-NEXT:     Type: ABSOLUTE
+-# BASEREL-NEXT:     Address: 0x1000
++# BASEREL-NEXT:     Type: ARM_MOV32(T)
++# BASEREL-NEXT:     Address: 0x102E
+ # BASEREL-NEXT:   }
+ # BASEREL-NEXT:   Entry {
+ # BASEREL-NEXT:     Type: HIGHLOW
+@@ -62,7 +62,9 @@
+ # DISASM-NEXT:               4661            mov     r1, r12
+ # DISASM-NEXT:               f242 0004       movw r0, #8196
+ # DISASM-NEXT:               f2c0 0040       movt    r0, #64
+-# DISASM-NEXT:               f7ff ffe7       bl      0x401000 <.text>
++# DISASM-NEXT:               f241 0c01       movw r12, #4097
++# DISASM-NEXT:               f2c0 0c40       movt    r12, #64
++# DISASM-NEXT:               47e0            blx     r12
+ # DISASM-NEXT:               4684            mov     r12, r0
+ # DISASM-NEXT:               ecbd 0b10       vpop    {d0, d1, d2, d3, d4, d5, d6, d7}
+ # DISASM-NEXT:               e8bd 480f       pop.w   {r0, r1, r2, r3, r11, lr}

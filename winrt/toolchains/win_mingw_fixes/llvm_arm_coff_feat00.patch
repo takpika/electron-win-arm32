@@ -1,0 +1,32 @@
+diff -ru a/llvm/lib/Target/ARM/ARMAsmPrinter.cpp b/llvm/lib/Target/ARM/ARMAsmPrinter.cpp
+--- a/llvm/lib/Target/ARM/ARMAsmPrinter.cpp	2026-10-01 13:46:51.151710002 +0000
++++ b/llvm/lib/Target/ARM/ARMAsmPrinter.cpp	2026-10-01 13:46:51.163717710 +0000
+@@ -545,6 +545,13 @@
+   if (TT.isOSBinFormatELF())
+     emitAttributes();
+ 
++  // Emit @feat.00 on COFF, as AArch64 and X86 do. Without it the linker
++  // treats the object as not CFG-aware: lld-link ignores its .gfids$y (and
++  // .gljmp$y) and falls back to admitting every function-typed relocation
++  // target to the image's Control Flow Guard tables.
++  if (TT.isOSBinFormatCOFF())
++    emitCOFFFeatureSymbol(M);
++
+   // Use the triple's architecture and subarchitecture to determine
+   // if we're thumb for the purposes of the top level code16 state.
+   if (!M.getModuleInlineAsm().empty() && TT.isThumb())
+diff -ru a/llvm/test/CodeGen/ARM/cfguard-module-flag.ll b/llvm/test/CodeGen/ARM/cfguard-module-flag.ll
+--- a/llvm/test/CodeGen/ARM/cfguard-module-flag.ll	2026-10-01 13:46:51.153710002 +0000
++++ b/llvm/test/CodeGen/ARM/cfguard-module-flag.ll	2026-10-01 13:46:51.163817002 +0000
+@@ -6,6 +6,11 @@
+ ; RUN: sed -e s/.dispatch:// %s | llc -mtriple=arm-pc-windows-msvc | FileCheck %s --check-prefixes=CHECK,USEDISPATCH
+ ; Control Flow Guard is currently only available on Windows
+ 
++; If no checks were inserted then the GuardCF bit shouldn't be set in @feat.00.
++; TABLEONLY:    "@feat.00" = 0
++; USECHECK:     "@feat.00" = 2048
++; USEDISPATCH:  "@feat.00" = 2048
++
+ declare void @target_func()
+ 
+ define void @func_in_module_without_cfguard() #0 {

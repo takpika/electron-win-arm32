@@ -1,0 +1,23 @@
+# Generates ffmpeg's win/arm-neon configuration (both brandings) for the
+# ffmpeg revision in the tree, on the build host with the port's pinned
+# llvm-mingw toolchain, the same way every other Chromium ffmpeg config cell is
+# produced: chromium/scripts/build_ffmpeg.py (configure + make), whose outputs
+# copy_config.sh then copies into chromium/config/<branding>/win/arm-neon/.
+# ffbuild/version.sh normally derives FFMPEG_VERSION from `git describe` over
+# upstream FFmpeg history, which the pinned ffmpeg checkout does not contain;
+# `revision` (version.sh's own override) is set to the value Chromium's roll
+# stamped into the pin's shipped cells (read from win/x64), so this cell
+# carries the same version string as every other cell of the same pin.
+# The build.arm-neon.win/ directories and configure's scratch files stay inside
+# the build directory. Run with any build directory, e.g.
+#   ninja -C out/chrome108 -f /home/winrt/toolchains/win_mingw_fixes/ffmpeg_win_arm_neon_config.ninja ffmpeg_win_arm_neon_config
+
+tc = /home/winrt/sdk/llvm-mingw-winrt/bin
+
+rule build_ffmpeg
+  command = rm -rf ffmpeg_cfg && mkdir -p ffmpeg_cfg/tmp && cd ffmpeg_cfg && revision=$$(sed -n 's/^#define FFMPEG_VERSION "\(.*\)"$$/\1/p' ../../../third_party/ffmpeg/chromium/config/Chrome/win/x64/libavutil/ffversion.h) && test -n "$$revision" && export revision && TMPDIR=$$PWD/tmp python3 ../../../third_party/ffmpeg/chromium/scripts/build_ffmpeg.py win arm-neon -- --cc=$tc/armv7-w64-mingw32-clang --cxx=$tc/armv7-w64-mingw32-clang++ --ld=$tc/armv7-w64-mingw32-clang --ar=$tc/llvm-ar --nm=$tc/llvm-nm --ranlib=$tc/llvm-ranlib --strip=$tc/llvm-strip > ../ffmpeg_cfg.log 2>&1 && touch ../$out
+  description = FFMPEG CONFIG win arm-neon (log: ffmpeg_cfg.log)
+  pool = console
+
+build ffmpeg_win_arm_neon_config.stamp: build_ffmpeg ../../third_party/ffmpeg/chromium/scripts/build_ffmpeg.py
+build ffmpeg_win_arm_neon_config: phony ffmpeg_win_arm_neon_config.stamp
