@@ -1,0 +1,53 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: takpika <t@takpika.jp>
+Date: Wed, 7 Oct 2026 12:00:00 +0900
+Subject: build: write the import library of executables with exports on win-arm32
+
+The win-arm32 toolchain links with lld-link in MinGW mode, which writes an
+import library only when one is named with /IMPLIB. link.exe writes
+<name>.lib for every image with exports; Electron ships electron.lib, the
+import library of electron.exe, as node.lib for native addons. Name it for
+executables of the win-arm32 toolchain.
+
+diff --git a/build/toolchain/win/toolchain.gni b/build/toolchain/win/toolchain.gni
+index 6c0078c98b2b4c55af8d7091a084328eda48d8ce..0baf00878cc078c18f160adbc1f6b991b5db5ecf 100644
+--- a/build/toolchain/win/toolchain.gni
++++ b/build/toolchain/win/toolchain.gni
+@@ -129,6 +129,14 @@ template("msvc_toolchain") {
+       exe_link_wrapper = ""
+     }
+ 
++    # Import library of an executable that exports symbols, for toolchains
++    # whose linker does not write it by default (link.exe does, as <name>.lib).
++    if (defined(invoker.exe_implib)) {
++      exe_implib = " ${invoker.exe_implib}"
++    } else {
++      exe_implib = ""
++    }
++
+     # Link inputs that come after the image's own objects, libraries and
+     # ldflags (the position a compiler driver gives the C runtime libraries).
+     if (defined(invoker.sys_link_inputs)) {
+@@ -510,7 +518,7 @@ template("msvc_toolchain") {
+       rspfile = "$exename.rsp"
+       pool = "//build/toolchain:link_pool($default_toolchain)"
+ 
+-      command = "$exe_link_wrapper$linker_wrapper$link /OUT:$exename /nologo ${sys_lib_flags} /PDB:$pdbname @$rspfile$sys_link_inputs"
++      command = "$exe_link_wrapper$linker_wrapper$link /OUT:$exename /nologo ${sys_lib_flags} /PDB:$pdbname$exe_implib @$rspfile$sys_link_inputs"
+ 
+       default_output_extension = ".exe"
+       default_output_dir = "{{root_out_dir}}"
+@@ -698,6 +706,13 @@ template("win_toolchains") {
+             "libclang_rt.builtins-$_rt_arch.a libcmt.lib libvcruntime.lib " +
+             "libucrt.lib legacy_stdio_definitions.lib kernel32.lib"
+         dll_startup = "/ENTRY:_DllMainCRTStartup"
++        # MinGW mode writes an import library only when one is named (lld
++        # COFF Driver.cpp: "In MinGW mode, we only do that when the -implib
++        # option is given explicitly"); link.exe writes <name>.lib for every
++        # image with exports, e.g. electron.lib, which Electron ships as
++        # node.lib for native addons. lld still writes none for an image
++        # without exports.
++        exe_implib = "/IMPLIB:{{output_dir}}/{{target_output_name}}.lib"
+         exe_link_wrapper =
+             "$python_path " +
+             rebase_path("//build/toolchain/win/mingw_exe_entry.py",
