@@ -8,7 +8,7 @@ vars = {
   'chromium_win_arm32_git':
     'https://github.com/takpika/chromium-win-arm32.git',
   'chromium_win_arm32_commit':
-    '8468dcbae6b54594466aa12fc2105066eb0cb676',
+    'f3be4a4292ab9786ca767c53ca0071cf42a8b465',
   'node_version':
     'v16.17.1',
   'nan_version':
